@@ -1,1 +1,35 @@
-{}
+{
+    "running_path" : "judge",
+
+    "debug" : true,
+
+    "fetch_interval" : 2000,
+
+    "buffer_size" : 1024,
+
+    "max_time" : 500,
+
+    "max_memory" : 102400,
+
+    "security_policy_file" : "judge/security_policy_file",
+
+    "remote_socket" : "",
+
+    "judgeAccessName" : "",
+
+    "judgeAccessSecret" : "",
+
+    "judgeFetchSolution" : "",
+
+    "handleJudgeUpdateResult" : "",
+
+    "getProblemResourcesHash" : "",
+
+    "getProblemResourcesZip" : "",
+
+    "compile_script" : "./compile-scripts",
+
+    "compile_name" : "solution",
+
+    "run_script" : "./run-scripts"
+}

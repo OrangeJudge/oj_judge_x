@@ -1,33 +1,23 @@
 package oj.judge.runner;
 
-import static java.nio.file.StandardOpenOption.CREATE;
-import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
-import static java.nio.file.StandardOpenOption.WRITE;
-
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
-import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Arrays;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import oj.judge.common.Callback;
 import oj.judge.common.Conf;
+import oj.judge.common.Result;
 import oj.judge.common.Solution;
-
-import org.json.JSONObject;
 
 public class Runner extends Thread {
 	private static final String label = "Runner::";
 
-	public enum E { ERROR, FINISH };
+	public enum E { FINISH, ERROR };
 	public Map<E, Callback> listener;
 
 	public void reg(E e, Callback c) {
@@ -40,175 +30,190 @@ public class Runner extends Thread {
 
 	@Override
 	public void run() {
-		prepare();
-		execute();
-		cleanUp();
-		checker.check(solution);
+		if (runningPath.toFile().exists())
+			delete(runningPath.toFile());
+		runningPath.toFile().mkdir();
 
+		if (solution.problem.totalCase == 0) {
+			if (Conf.debug()) System.out.println(label + "solution.problem.totalCase == 0");
+			return ;
+		}
+
+		result = new Result();
+		compile();
+		if (result.verdict == Result.Verdict.NONE) {
+			for (int i = 0; i < solution.problem.totalCase; i++) {
+				result = new Result();
+				solution.result.add(result);
+
+				judge(i);
+				if (solution.result.get(0).verdict != Result.Verdict.AC)
+					break;
+			}
+		}
+		else {
+			solution.result.add(result);
+		}
+		delete(runningPath.toFile());
 		emit(E.FINISH, solution);
 	}
 
 	public Integer id;
 	public Solution solution;
+	public Result result; // for easy access
 
 	public Path runningPath;
+	public Path executable;
 	public Path securityPolicy;
-	public Path inputFile;
-	public Path outputFile;
-	public Path errorFile;
-	public Path resultFile;
 
-	public long timeOut;
-	public int bufferSize;
+	public Runner(Integer i, Path savePath, Solution sol) {
+		id = i;
+		listener = new HashMap<>();
 
-	public Checker checker;
+		solution = sol;
 
-	public Runner(Integer id, Path runningPath, Solution solution, Checker checker) {
-		this.id = id;
-		this.listener = new HashMap<E, Callback>();
+		runningPath = Paths.get(savePath + "/" + sol.id);
+		executable = Paths.get(runningPath + "/" + Conf.compileName());
 
-		this.timeOut = Conf.timeOut();
-		this.bufferSize = Conf.bufferSize();
-		
-		this.runningPath = runningPath;
-		this.securityPolicy = Conf.securityPolicyFile();
-		this.inputFile   = Paths.get(runningPath + "/" + "in");
-		this.outputFile  = Paths.get(runningPath + "/" + "out");
-		this.errorFile   = Paths.get(runningPath + "/" + "error");
-		this.resultFile  = Paths.get(runningPath + "/" + id.toString());
+		securityPolicy = Conf.securityPolicyFile();
 
-		this.solution    = solution;
-		this.checker     = checker;
+		if (!Files.exists(runningPath))
+			runningPath.toFile().mkdirs();
 	}
 
-	public void prepare() {
-		if (solution.judged())
+	public void judge(int caseNo) {
+		Path casePath = Paths.get(runningPath + "/" + (1 + caseNo));
+		if (casePath.toFile().exists())
+			delete(casePath.toFile());
+		casePath.toFile().mkdir();
+
+		Path input = Paths.get(   casePath + "/input"   );
+		Path output = Paths.get(  casePath + "/output"  );
+		Path error = Paths.get(   casePath + "/error"   );
+		Path metricsFile = Paths.get( casePath + "/metrics" );
+
+		if (!solution.problem.saveInput(caseNo, input)) {
+			result.verdict = Result.Verdict.JE;
 			return ;
-
-		try {
-			boolean ok = solution.compileSave(runningPath);
-			if (!ok)
-				solution.result = Solution.Result.CE;
-		} catch (IOException e) {
-			solution.result = Solution.Result.JE;
 		}
 
 		try {
-			if (solution.judged())
-				return ;
-
-			OpenOption[] options = new OpenOption[] { WRITE, CREATE, TRUNCATE_EXISTING };
-			BufferedWriter writer = Files.newBufferedWriter(inputFile, Charset.forName("US-ASCII"), options);
-			writer.write(solution.problem.input, 0, solution.problem.input.length());
-			writer.close();
-			
-			writer = Files.newBufferedWriter(outputFile, Charset.forName("US-ASCII"), options);
-			writer.close();
-			
-			writer = Files.newBufferedWriter(errorFile, Charset.forName("US-ASCII"), options);
-			writer.close();
+			output.toFile().createNewFile();
+			error.toFile().createNewFile();
+			metricsFile.toFile().createNewFile();
 		} catch (IOException e) {
 			e.printStackTrace();
-			solution.result = Solution.Result.JE;
-		}
-	}
-	public boolean cleanUp() {
-		boolean ok = true;
-		ok &= delete(inputFile.toFile());
-		ok &= delete(outputFile.toFile());
-		ok &= delete(errorFile.toFile());
-		ok &= delete(resultFile.toFile());
-		ok &= delete(Paths.get(runningPath + "/" + solution.codeClass + ".class").toFile());
-		ok &= delete(Paths.get(runningPath + "/" + "SecureRunner" + ".class").toFile());
-		return ok;
-	}
-	public boolean delete(File f) {
-		return (f.exists() && !f.isDirectory()) ? f.delete() : false;
-	}
-
-	public void execute() {
-		if (solution.judged())
+			result.verdict = Result.Verdict.JE;
 			return ;
-		
-		applyLinux();
-		
-        //
-        // TODO
-        // drop wrapper class
-        //
+		}
 
-		List<String> cmd = Arrays.asList("java"
-				, "-client"
-				, "-Xmx" + (int)(solution.problem.memoryLimit + 10) + "m"
-				, "-Xss64m"
-//				, "-Djava.security.manager"
-//				, "-Djava.security.policy=" + securityPolicy
-				, "-cp"
-				, runningPath.toString()
-//				, solution.codeClass
-				, Solution.secureRunnerClass
-				, resultFile.toString()
-				, securityPolicy.toString()
-				);
-		
-		ProcessBuilder pb = new ProcessBuilder(cmd);
+		result.verdict = new Executor(
+				solution.language,
+				solution.problem.timeLimit,
+				solution.problem.memoryLimit,
+				executable,
+				input,
+				output,
+				error,
+				metricsFile
+		).execute();
 
-		pb.redirectInput(inputFile.toFile());
-		pb.redirectOutput(outputFile.toFile());
-		pb.redirectError(errorFile.toFile());
+		if (result.verdict != Result.Verdict.NONE) {
+			return ;
+		}
+
+		if (Conf.debug()) System.out.println(label + "output size = " + output.toFile().length());
+		if (Conf.debug()) System.out.println(label + "error  size = " + error.toFile().length());
+		if (output.toFile().length() >= Conf.outputLimit() || error.toFile().length() >= Conf.outputLimit()) {
+			result.verdict = Result.Verdict.OL;
+			return ;
+		}
+
+		Charset charset;
+		if (Conf.debug()) System.out.println(System.getProperty("os.name"));
+		if (System.getProperty("os.name").contains("Windows")) {
+			charset = Charset.forName("utf-16"); // "windows-1252"
+		}
+		else {
+			charset = Charset.defaultCharset();
+		}
 
 		try {
-			Process p = pb.start();
-			
-			Thread.sleep(timeOut);
-			if (p.isAlive()) {
-				p.destroyForcibly();
-				solution.result = Solution.Result.TL;
-			}
+			result.output = new String(Files.readAllBytes(output), charset);
+			result.error = new String(Files.readAllBytes(error), charset);
+			result.metrics = new String(Files.readAllBytes(metricsFile), charset);
 
-			if (solution.judged())
-				return ;
-
-			solution.error = Files.lines(errorFile).reduce("", (a, b) -> a + '\n' + b);
-			if (solution.error.length() > 0) {
-				if (Conf.debug()) System.out.println("error : ----\n" + solution.error  + "\n------------");
-				solution.result = Solution.Result.JE;
-//				solution.result = Solution.Result.RE;
+			if (result.metrics.contains("Command terminated by signal")) {
+				result.verdict = Result.Verdict.RE;
 				return ;
 			}
-
-			if (outputFile.toFile().length() > bufferSize) {
-				solution.result = Solution.Result.OL;
-			}
-			else {
-				solution.output = Files.lines(outputFile).reduce("", (a, b) -> a + '\n' + b);
-				solution.runnerResult = new JSONObject(Files.lines(resultFile).reduce("", String::concat));
-			}
-
-			if (Conf.debug()) System.out.println("output: ----\n" + solution.output + "\n------------");
-
 		} catch (IOException e) {
 			e.printStackTrace();
-			solution.result = Solution.Result.JE;
-		} catch (InterruptedException e) {
+			result.verdict = Result.Verdict.JE;
+			return ;
+		}
+
+		Checker.check(result, solution.problem.timeLimit, solution.problem.memoryLimit, solution.problem.output.get(caseNo));
+	}
+
+	public void compile() {
+		Path source = Paths.get(runningPath + "/source");
+//		executable = executable;
+		Path compileOut = Paths.get(runningPath + "/compileOut");
+		Path compileError = Paths.get(runningPath + "/compileError");
+
+		//SOURCE=$1
+		//OUT=$2
+		//COMOUT=$3
+		//COMERROR=$4
+
+		if (!solution.saveSource(source)) {
+			result.verdict = Result.Verdict.JE;
+			return ;
+		}
+
+		try {
+			boolean ok = Compiler.compile(
+					solution.language,
+					source.toAbsolutePath(),
+					executable.toAbsolutePath(),
+					compileOut.toAbsolutePath(),
+					compileError.toAbsolutePath()
+			);
+			if (!ok) {
+				result.verdict = Result.Verdict.CE;
+
+				Charset charset;
+				if (Conf.debug()) System.out.println(System.getProperty("os.name"));
+				if (System.getProperty("os.name").contains("Windows")) {
+					charset = Charset.forName("utf-16"); // "windows-1252"
+				}
+				else {
+					charset = Charset.defaultCharset();
+				}
+
+				try {
+					result.compileOut = new String(Files.readAllBytes(compileOut), charset);
+					result.compileError = new String(Files.readAllBytes(compileError), charset);
+				} catch (IOException e) {
+					e.printStackTrace();
+					result.verdict = Result.Verdict.JE;
+					return ;
+				}
+			}
+		} catch (IOException e) {
 			e.printStackTrace();
-			solution.result = Solution.Result.JE;
+			result.verdict = Result.Verdict.JE;
 		}
 	}
-	
-	public String readBR(BufferedReader br) throws IOException {
-		char[] buffer = new char[bufferSize];
-		int actualRead = br.read(buffer, 0, bufferSize);
-		if (actualRead == -1)
-			return "";
-		else
-			return new String(buffer, 0, actualRead);
-	}
-	
-	public void applyLinux() {
-        //
-        // TODO
-        // drop wrapper class
-        //
+
+	public void delete(File f) {
+		if (f.isDirectory())
+			for (File ff : f.listFiles()) {
+				if (Conf.debug()) System.out.println("deleting " + ff.getAbsolutePath() + "...");
+//				delete(ff);
+			}
+		if (Conf.debug()) System.out.println("deleting " + f.getAbsolutePath() + "...");
+//		f.delete();
 	}
 }
